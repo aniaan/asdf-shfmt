@@ -69,6 +69,10 @@ DOWNLOAD_BASE_URL = GITHUB_URL + "/releases/download/{version}"
 BINARY_URL = DOWNLOAD_BASE_URL + "/{filename}"
 CHECKSUM_URL = DOWNLOAD_BASE_URL + "/{checksum_filename}"
 
+def list_repo_url(plugin_name: str) -> str:
+    plugin = get_plugin(plugin_name)
+    return GITHUB_URL.format(repo_name=plugin.repo_name)
+
 
 def list_version(plugin_name: str) -> str:
     plugin = get_plugin(plugin_name)
