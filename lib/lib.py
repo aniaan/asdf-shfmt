@@ -74,7 +74,7 @@ def list_repo_url(plugin_name: str) -> str:
     return GITHUB_URL.format(repo_name=plugin.repo_name)
 
 
-def list_version(plugin_name: str) -> str:
+def list_version(plugin_name: str, with_published_at: bool = False) -> str:
     plugin = get_plugin(plugin_name)
     url = API_RELEASE_URL.format(repo_name=plugin.repo_name)
 
@@ -90,7 +90,10 @@ def list_version(plugin_name: str) -> str:
 
         recent_versions = sorted_releases[:10]
 
-        versions = [release["tag_name"].lstrip("v") for release in recent_versions]
+        if with_published_at:
+            versions = [release["tag_name"].lstrip("v") + "#" + release["published_at"] for release in recent_versions]
+        else:
+            versions = [release["tag_name"].lstrip("v") for release in recent_versions]
         versions = list(reversed(versions))
 
         return "\n".join(versions)
