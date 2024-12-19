@@ -39,6 +39,7 @@ class Plugin:
     cmd: str
     repo_name: str
     filename_template: LibTemplate = ""
+    checksum_stage: Literal["download", "extract"] = "download"
     checksum_filename_template: LibTemplate = ""
     bin_path: LibTemplate = ""
     platform_map: dict[PlatformType, str] | None = None
@@ -138,7 +139,8 @@ def get_normalize_version(version: str) -> str:
     return version.lstrip("v")
 
 
-def verify_checksum(file_path: Path, checksum_path: Path) -> bool:
+def verify_checksum(file_path: Path, checksum_path: Path):
+    print(f"Verifying checksum for {file_path.name}...")
     with open(checksum_path) as f:
         expected = None
         lines = f.readlines()
@@ -155,7 +157,11 @@ def verify_checksum(file_path: Path, checksum_path: Path) -> bool:
     result = subprocess.run([*cmd, file_path], capture_output=True, text=True)
     actual = result.stdout.split()[0]
 
-    return actual == expected
+    if actual != expected:
+        raise Exception(
+            f"Checksum verification failed: {actual} != {expected} for {file_path.name}"
+        )
+    print("Checksum verification passed")
 
 
 def format_template(template: LibTemplate, format_kwargs: FormatKwargs) -> str:
@@ -216,6 +222,7 @@ def install_version(plugin_name: str, normalize_version: str, install_path: str)
         **format_kwargs,
     )
 
+    checker = lambda file_path: None
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         download_path = tmp_path / filename
@@ -234,11 +241,18 @@ def install_version(plugin_name: str, normalize_version: str, install_path: str)
             with urlopen(checksum_url) as response:
                 checksum_path.write_bytes(response.read())
 
-            print("Verifying checksum...")
-            if not verify_checksum(download_path, checksum_path):
-                raise Exception("Checksum verification failed")
+            checker = lambda file_path: verify_checksum(file_path, checksum_path)
 
-            print("Checksum verification passed")
+            # print("Verifying checksum...")
+            # if not verify_checksum(download_path, checksum_path):
+            #     raise Exception("Checksum verification failed")
+            #
+            # print("Checksum verification passed")
+        
+
+        if plugin.checksum_stage == "download":
+            checker(download_path)
+
 
         extract_path = tmp_path / "extract"
         extract_path.mkdir(exist_ok=True)
@@ -252,6 +266,9 @@ def install_version(plugin_name: str, normalize_version: str, install_path: str)
             )
         else:
             shutil.copy2(download_path, extract_path / bin_path)
+
+        if plugin.checksum_stage == "extract":
+            checker(extract_path / bin_path)
 
         if not plugin.custom_copy:
             print("Using default copy function...")
