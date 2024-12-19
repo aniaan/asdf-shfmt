@@ -44,8 +44,11 @@ class Plugin:
     platform_map: dict[PlatformType, str] | None = None
     arch_map: dict[ArchType, str] | None = None
     recover_raw_version: Callable[[str], str] = lambda x: x
+    normalize_version: Callable[[str], str] = lambda x: x.removeprefix("v")
     custom_copy: Callable[["Plugin", Path, Path, FormatKwargs], None] | None = None
     is_compressed: bool = True
+    # list version filter
+    release_filter: Callable[[dict], bool] = lambda _: True
 
 
 def get_plugin(plugin_name: str) -> Plugin:
@@ -69,6 +72,7 @@ DOWNLOAD_BASE_URL = GITHUB_URL + "/releases/download/{version}"
 BINARY_URL = DOWNLOAD_BASE_URL + "/{filename}"
 CHECKSUM_URL = DOWNLOAD_BASE_URL + "/{checksum_filename}"
 
+
 def list_repo_url(plugin_name: str) -> str:
     plugin = get_plugin(plugin_name)
     return GITHUB_URL.format(repo_name=plugin.repo_name)
@@ -83,7 +87,7 @@ def list_version(plugin_name: str, with_published_at: bool = False) -> str:
             releases = json.loads(response.read())
 
         sorted_releases = sorted(
-            releases,
+            filter(plugin.release_filter, releases),
             key=lambda x: datetime.strptime(x["published_at"], "%Y-%m-%dT%H:%M:%SZ"),
             reverse=True,
         )
@@ -91,9 +95,17 @@ def list_version(plugin_name: str, with_published_at: bool = False) -> str:
         recent_versions = sorted_releases[:10]
 
         if with_published_at:
-            versions = [release["tag_name"].lstrip("v") + "#" + release["published_at"] for release in recent_versions]
+            versions = [
+                plugin.normalize_version(release["tag_name"])
+                + "#"
+                + release["published_at"]
+                for release in recent_versions
+            ]
         else:
-            versions = [release["tag_name"].lstrip("v") for release in recent_versions]
+            versions = [
+                plugin.normalize_version(release["tag_name"])
+                for release in recent_versions
+            ]
         versions = list(reversed(versions))
 
         return "\n".join(versions)
