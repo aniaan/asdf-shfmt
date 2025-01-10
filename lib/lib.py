@@ -11,9 +11,11 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Literal, TypedDict, Union
+from typing import Any, Callable, Literal, TypedDict, Union
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+from packaging import version
 
 PlatformType = Literal["darwin", "linux"]
 ArchType = Literal["x86_64", "aarch64"]
@@ -92,6 +94,11 @@ def verify_by_minisign(
     print(f"minisign: verification passed {file_path.name}")
 
 
+publish_at_sort_version_key = lambda x: datetime.strptime(
+    x["published_at"], "%Y-%m-%dT%H:%M:%SZ"
+)
+
+
 @dataclass(kw_only=True)
 class Plugin:
     name: str
@@ -110,6 +117,7 @@ class Plugin:
     # list version filter
     release_filter: Callable[[dict], bool] = lambda _: True
     custom_checker: Callable[[Path, Path, FormatKwargs], None] | None = None
+    sort_version_key: Callable[[dict], Any] = publish_at_sort_version_key
 
 
 def get_plugin(plugin_name: str) -> Plugin:
@@ -149,7 +157,7 @@ def list_version(plugin_name: str, with_published_at: bool = False) -> str:
 
         sorted_releases = sorted(
             filter(plugin.release_filter, releases),
-            key=lambda x: datetime.strptime(x["published_at"], "%Y-%m-%dT%H:%M:%SZ"),
+            key = plugin.sort_version_key,
             reverse=True,
         )
 
