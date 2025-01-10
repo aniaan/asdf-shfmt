@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal, TypedDict, Union
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 PlatformType = Literal["darwin", "linux"]
 ArchType = Literal["x86_64", "aarch64"]
@@ -33,6 +33,65 @@ class FormatKwargs(TypedDict):
 LibTemplate = Union[str, Callable[[FormatKwargs], str]]
 
 
+def verify_by_sha256sum(file_path: Path, checksum_path: Path):
+    print(f"Verifying checksum for {file_path.name}...")
+    if not shutil.which("shasum") and not shutil.which("sha256sum"):
+        raise Exception("shasum or sha256sum not found")
+    with open(checksum_path) as f:
+        expected = None
+        lines = f.readlines()
+        for line in lines:
+            if file_path.name in line:
+                expected = line.split()[0]
+                break
+        if not expected and len(lines) == 1:
+            expected = lines[0].split()[0]
+        if not expected:
+            raise Exception(f"Checksum not found for {file_path.name}")
+
+    cmd = ["shasum", "-a", "256"] if shutil.which("shasum") else ["sha256sum"]
+    result = subprocess.run([*cmd, file_path], capture_output=True, text=True)
+    actual = result.stdout.split()[0]
+
+    if actual != expected:
+        raise Exception(
+            f"Checksum verification failed: {actual} != {expected} for {file_path.name}"
+        )
+    print("Checksum verification passed")
+
+
+def _verify_by_minisign(
+    bin_path: str, public_key: str, file_path: Path, signature_path: Path
+):
+    cmd = [bin_path, "-P", public_key, "-x", signature_path, "-Vm", file_path]
+    result = subprocess.run([*cmd, file_path], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Exception(f"Error checking signature: {result.stderr}")
+
+
+_MINISIGN_VERSION = "0.11"
+_MINISIGN_CMD = "minisign"
+
+
+def verify_by_minisign(
+    public_key: str, file_path: Path, signature_path: Path, format_kwargs: FormatKwargs
+):
+    print(f"minisign: Verifying signature for {file_path.name}...")
+    if shutil.which(_MINISIGN_CMD):
+        _verify_by_minisign(_MINISIGN_CMD, public_key, file_path, signature_path)
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        install_path = Path(tmpdir)
+        install_path.mkdir(exist_ok=True)
+
+        install_version(_MINISIGN_CMD, _MINISIGN_VERSION, install_path.as_posix())
+        bin_path = install_path / "bin" / _MINISIGN_CMD
+        _verify_by_minisign(bin_path.as_posix(), public_key, file_path, signature_path)
+
+    print(f"minisign: verification passed {file_path.name}")
+
+
 @dataclass(kw_only=True)
 class Plugin:
     name: str
@@ -50,6 +109,7 @@ class Plugin:
     is_compressed: bool = True
     # list version filter
     release_filter: Callable[[dict], bool] = lambda _: True
+    custom_checker: Callable[[Path, Path, FormatKwargs], None] | None = None
 
 
 def get_plugin(plugin_name: str) -> Plugin:
@@ -139,38 +199,14 @@ def get_normalize_version(version: str) -> str:
     return version.lstrip("v")
 
 
-def verify_checksum(file_path: Path, checksum_path: Path):
-    print(f"Verifying checksum for {file_path.name}...")
-    with open(checksum_path) as f:
-        expected = None
-        lines = f.readlines()
-        for line in lines:
-            if file_path.name in line:
-                expected = line.split()[0]
-                break
-        if not expected and len(lines) == 1:
-            expected = lines[0].split()[0]
-        if not expected:
-            raise Exception(f"Checksum not found for {file_path.name}")
-
-    cmd = ["shasum", "-a", "256"] if shutil.which("shasum") else ["sha256sum"]
-    result = subprocess.run([*cmd, file_path], capture_output=True, text=True)
-    actual = result.stdout.split()[0]
-
-    if actual != expected:
-        raise Exception(
-            f"Checksum verification failed: {actual} != {expected} for {file_path.name}"
-        )
-    print("Checksum verification passed")
-
-
 def format_template(template: LibTemplate, format_kwargs: FormatKwargs) -> str:
     if callable(template):
         return template(format_kwargs)
     return template.format(**format_kwargs)
 
 
-def extract(filename, download_path: Path, extract_path: Path, bin_path: str):
+def extract(download_path: Path, extract_path: Path, bin_path: str):
+    filename = download_path.name
     if filename.endswith(".tar.gz"):
         with tarfile.open(download_path, mode="r:gz") as tar:
             tar.extractall(extract_path, filter="data")
@@ -187,6 +223,47 @@ def extract(filename, download_path: Path, extract_path: Path, bin_path: str):
             zip_ref.extractall(extract_path)
     else:
         raise Exception(f"Unsupported file type: {filename}")
+
+
+def _download_file(url: str, download_path: Path):
+    print(f"Downloading {url} ...")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    req = Request(url=url, headers=headers)
+
+    with urlopen(req) as response:
+        download_path.write_bytes(response.read())
+
+
+def _get_checker(
+    plugin: Plugin,
+    download_dir: Path,
+    checksum_filename: str,
+    format_kwargs: FormatKwargs,
+) -> Callable[[Path], None]:
+    if not checksum_filename:
+        return lambda _: None
+
+    checksum_url = (
+        checksum_filename
+        if checksum_filename.startswith("https")
+        else CHECKSUM_URL.format(
+            **format_kwargs,
+        )
+    )
+    checksum_path = download_dir / Path(checksum_filename).name
+    _download_file(url=checksum_url, download_path=checksum_path)
+
+    if plugin.custom_checker:
+        checker = lambda file_path: plugin.custom_checker(
+            file_path, checksum_path, format_kwargs
+        )  # type: ignore
+    else:
+        checker = lambda file_path: verify_by_sha256sum(file_path, checksum_path)
+
+    return checker
 
 
 def install_version(plugin_name: str, normalize_version: str, install_path: str):
@@ -218,48 +295,31 @@ def install_version(plugin_name: str, normalize_version: str, install_path: str)
 
     bin_path = format_template(plugin.bin_path, format_kwargs)
 
-    download_url = BINARY_URL.format(
-        **format_kwargs,
+    download_url = (
+        filename if filename.startswith("https") else BINARY_URL.format(**format_kwargs)
     )
 
-    checker = lambda file_path: None
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
-        download_path = tmp_path / filename
+        download_path = tmp_path / Path(filename).name
 
-        print(f"Downloading {download_url}...")
-        with urlopen(download_url) as response:
-            download_path.write_bytes(response.read())
+        _download_file(url=download_url, download_path=download_path)
 
-        if plugin.checksum_filename_template:
-            checksum_url = CHECKSUM_URL.format(
-                **format_kwargs,
-            )
-            checksum_path = tmp_path / checksum_filename
-
-            print(f"Downloading checksum file {checksum_url}...")
-            with urlopen(checksum_url) as response:
-                checksum_path.write_bytes(response.read())
-
-            checker = lambda file_path: verify_checksum(file_path, checksum_path)
-
-            # print("Verifying checksum...")
-            # if not verify_checksum(download_path, checksum_path):
-            #     raise Exception("Checksum verification failed")
-            #
-            # print("Checksum verification passed")
-        
+        checker = _get_checker(
+            plugin=plugin,
+            download_dir=tmp_path,
+            checksum_filename=checksum_filename,
+            format_kwargs=format_kwargs,
+        )
 
         if plugin.checksum_stage == "download":
             checker(download_path)
-
 
         extract_path = tmp_path / "extract"
         extract_path.mkdir(exist_ok=True)
 
         if plugin.is_compressed:
             extract(
-                filename=filename,
                 download_path=download_path,
                 extract_path=extract_path,
                 bin_path=bin_path,
@@ -271,7 +331,7 @@ def install_version(plugin_name: str, normalize_version: str, install_path: str)
             checker(extract_path / bin_path)
 
         if not plugin.custom_copy:
-            print("Using default copy function...")
+            print(f"{plugin.name}: Using default copy function...")
             src = extract_path / bin_path
             if not src.exists():
                 raise Exception(f"Binary file not found: {src}")
@@ -283,10 +343,10 @@ def install_version(plugin_name: str, normalize_version: str, install_path: str)
             shutil.copy2(src, dst)
             dst.chmod(0o755)
         else:
-            print("Using custom copy function...")
+            print(f"{plugin.name} Using custom copy function...")
             plugin.custom_copy(plugin, extract_path, Path(install_path), format_kwargs)
 
-    print("Installation completed successfully!")
+    print(f"{plugin.name} Installation completed successfully!")
 
 
 def main():
