@@ -15,7 +15,6 @@ from typing import Any, Callable, Literal, TypedDict, Union
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from packaging import version
 
 PlatformType = Literal["darwin", "linux"]
 ArchType = Literal["x86_64", "aarch64"]
